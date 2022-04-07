@@ -1,0 +1,233 @@
+#!/usr/bin/env python
+
+import argparse
+import hashlib
+import os
+
+from typing import List, Tuple
+
+
+class HashMismatch(Exception):
+    pass
+
+
+def get_file_hash(filename: str, hash_type = hashlib.md5) -> bytes:
+    """Calculate the hash of a file."""
+    h = hash_type()
+    buffer_size = 8192
+    fp = open(filename, 'rb')
+    while True:
+        chunk = fp.read(buffer_size)
+        if not chunk:
+            break
+        h.update(chunk)
+    fp.close()
+    return h.digest()
+
+
+def get_all_hashes(file_list: List[str]):
+    """Yield a hash per file."""
+    for filename in file_list:
+        _hash = get_file_hash(filename)
+        yield _hash
+
+
+def aggregate_hashes(h1: bytes, h2: bytes, hash_type = hashlib.sha256) -> bytes:
+    """Aggregate two hashes into one."""
+    h = hash_type()
+    h.update(h1)
+    h.update(h2)
+    return h.digest()
+
+
+def build_tree_level(hashes: List[bytes], hash_type = hashlib.sha256) -> List[bytes]:
+    """Build the next level of the tree. It must be called multiple times."""
+    cur = hashes
+    new = []
+    n = len(cur)
+
+    is_odd = False
+    if n % 2 == 1:
+        n -= 1
+        is_odd = True
+
+    i = 0
+    while i < n:
+        _hash = aggregate_hashes(cur[i], cur[i + 1], hash_type=hash_type)
+        new.append(_hash)
+        i += 2
+
+    if is_odd:
+        new.append(cur[-1])
+    return new
+
+def build_merkle_tree(hashes: List[bytes], hash_type = hashlib.sha256) -> List[List[bytes]]:
+    """Build merkle tree."""
+    merkle_tree = [hashes]
+    while True:
+        if len(merkle_tree[-1]) <= 1:
+            break
+        merkle_tree.append(build_tree_level(merkle_tree[-1], hash_type=hash_type))
+    return merkle_tree
+
+
+def get_merkle_path(merkle_tree: List[List[bytes]], index: int) -> List[Tuple[str, bytes]]:
+    """Get a merkle path for a leaf."""
+    path = []
+    height = 0
+    idx = index
+    while height < len(merkle_tree) - 1:
+        if idx % 2 == 0:
+            if idx + 1 < len(merkle_tree[height]):
+                path.append(('R', merkle_tree[height][idx + 1]))
+            else:
+                # do nothing
+                pass
+        else:
+            path.append(('L', merkle_tree[height][idx - 1]))
+        height += 1
+        idx >>= 1
+    return path
+
+
+def verify_merkle_path(filename: str, file_hash: bytes, root_hash: bytes, path: List[Tuple[str, bytes]], hash_type = hashlib.sha256) -> bool:
+    """Validate a markle path."""
+    file_hash_calculated = get_file_hash(filename)
+    if file_hash != file_hash_calculated:
+        raise HashMismatch('File hash does not match')
+    cur = file_hash
+    for side, phash in path:
+        if side == 'L':
+            cur = aggregate_hashes(phash, cur, hash_type=hash_type)
+        elif side == 'R':
+            cur = aggregate_hashes(cur, phash, hash_type=hash_type)
+        else:
+            raise ValueError('Invalid side')
+    if cur == root_hash:
+        return True
+    return False
+
+
+def main_debug():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('files', nargs='+')
+
+    args = parser.parse_args()
+
+    hashes = list(get_all_hashes(args.files))
+    for f, h in zip(args.files, hashes):
+        print(f'{f:30s}: {h.hex()}')
+    print()
+
+    merkle_tree = build_merkle_tree(hashes)
+    for i, level_hashes in enumerate(merkle_tree):
+        print(f'level {i}')
+        for h in level_hashes:
+            print(f'    {h.hex()}')
+        print()
+
+    for index in range(len(merkle_tree[0])):
+        print('path')
+        filename = args.files[index]
+        file_hash = merkle_tree[0][index]
+        root_hash = merkle_tree[-1][0]
+        path = get_merkle_path(merkle_tree, index)
+        print('filename', filename)
+        print('file_hash', file_hash.hex())
+        print('root_hash', root_hash.hex())
+        print('index', index)
+        for p in path:
+            print(f'    {p[0]} {p[1].hex()}')
+        validated = verify_merkle_path(filename, file_hash, root_hash, path)
+        if validated:
+            print('VALIDATED!')
+        else:
+            print('ERROR!')
+        print()
+
+
+def main_generate_csv(args):
+    n_files = len(args.files)
+    hashes = list(get_all_hashes(args.files))
+    merkle_tree = build_merkle_tree(hashes)
+
+    if os.path.exists(args.output):
+        raise Exception('output already exists')
+
+    import csv
+    csvfile = open(args.output, 'w')
+
+    writer = csv.writer(csvfile)
+    writer.writerow(['filename', 'file_hash_method', 'file_hash', 'merkle_tree_hash_method', 'root_hash', 'merkle_path'])
+
+    for index in range(n_files):
+        filename = args.files[index]
+        file_hash = merkle_tree[0][index]
+        root_hash = merkle_tree[-1][0]
+        path = get_merkle_path(merkle_tree, index)
+        writer.writerow([
+            filename,
+            'md5',
+            file_hash.hex(),
+            'sha256',
+            root_hash.hex(),
+            ' '.join(f'{side}:{h.hex()}' for side, h in path),
+        ])
+
+    csvfile.close()
+    print(f'{args.output} successfully generated with {n_files} files.')
+    print(f'merkle root: {root_hash.hex()}')
+
+
+def main_verify(args):
+    import csv
+    csvfile = open(args.csvfile, 'r')
+    reader = csv.reader(csvfile)
+    it = iter(reader)
+    headers = next(it)
+    d = {}
+    for row in it:
+        filename = row[0]
+        d[filename] = row
+    csvfile.close()
+
+    for filename in args.files:
+        if filename not in d:
+            print(f'{filename}: fail, not found on csv')
+            continue
+        row = d[filename]
+        assert filename == row[0]
+        file_hash = bytes.fromhex(row[2])
+        root_hash = bytes.fromhex(row[4])
+        path_tmp = [line.split(':', 1) for line in row[5].split(' ')]
+        path = [(side, bytes.fromhex(h_hex)) for side, h_hex in path_tmp]
+        try:
+            validated = verify_merkle_path(filename, file_hash, root_hash, path)
+        except HashMismatch:
+            validated = False
+        if validated:
+            print(f'{filename}: success')
+        else:
+            print(f'{filename}: fail')
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+
+    subparsers = parser.add_subparsers(dest='command', required=True)
+    build_parser = subparsers.add_parser('build', help='build merkle paths')
+    verify_parser = subparsers.add_parser('verify', help='verify merkle paths')
+    cmd_map = {
+        'build': main_generate_csv,
+        'verify': main_verify,
+    }
+
+    build_parser.add_argument('output', help='file to save the output')
+    build_parser.add_argument('files', nargs='+', help='one or more files to generate the paths')
+
+    verify_parser.add_argument('csvfile', help='file to get the paths')
+    verify_parser.add_argument('files', nargs='+', help='one or more files to be verified')
+
+    args = parser.parse_args()
+    run = cmd_map[args.command]
+    run(args)

@@ -199,10 +199,15 @@ def main_verify(args):
         if filename not in d:
             print(f'{filename}: fail, not found on csv')
             continue
+        root_hash_hex = row[4]
+        if args.check_root:
+            if root_hash_hex != args.check_root:
+                print(f'{filename}: fail, root mismatch')
+                continue
         row = d[filename]
         assert filename == row[0]
         file_hash = bytes.fromhex(row[2])
-        root_hash = bytes.fromhex(row[4])
+        root_hash = bytes.fromhex(root_hash_hex)
         path_tmp = [line.split(':', 1) for line in row[5].split(' ')]
         path = [(side, bytes.fromhex(h_hex)) for side, h_hex in path_tmp]
         try:
@@ -231,6 +236,7 @@ if __name__ == '__main__':
     build_parser.add_argument('files', nargs='+', help='one or more files to generate the paths')
 
     verify_parser.add_argument('csvfile', help='file to get the paths')
+    verify_parser.add_argument('--check-root', help='Check merkle tree root')
     verify_parser.add_argument('files', nargs='+', help='one or more files to be verified')
 
     args = parser.parse_args()

@@ -175,8 +175,12 @@ def main_generate_csv(args):
         ])
 
     csvfile.close()
-    print(f'{args.output} successfully generated with {n_files} files.')
-    print(f'merkle root: {root_hash.hex()}')
+
+    if args.root_only:
+        print(root_hash.hex())
+    else:
+        print(f'{args.output} successfully generated with {n_files} files.')
+        print(f'merkle root: {root_hash.hex()}')
 
 
 def main_verify(args):
@@ -222,6 +226,7 @@ if __name__ == '__main__':
         'verify': main_verify,
     }
 
+    build_parser.add_argument('--root-only', action='store_true', help='print only the merkle tree root')
     build_parser.add_argument('output', help='file to save the output')
     build_parser.add_argument('files', nargs='+', help='one or more files to generate the paths')
 
